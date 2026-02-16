@@ -32,6 +32,7 @@ mod human_number;
 mod ioctl;
 mod log;
 mod nvidia;
+mod string_number;
 mod to_bytes;
 mod utils;
 mod uuid;
@@ -51,18 +52,20 @@ use crate::nvidia::ctrl2080bus::{Nv2080CtrlBusGetPciInfoParams, NV2080_CTRL_CMD_
 use crate::nvidia::ctrl2080gpu::NV2080_CTRL_CMD_GPU_GET_INFOROM_OBJECT_VERSION;
 use crate::nvidia::ctrl9096::NV9096_CTRL_CMD_GET_ZBC_CLEAR_TABLE;
 use crate::nvidia::ctrla081::{
-    NvA081CtrlCmdVgpuConfigGetMigrationCapParams, NvA081CtrlVgpuConfigGetVgpuTypeInfoParams,
-    NvA081CtrlVgpuInfo, NVA081_CTRL_CMD_VGPU_CONFIG_GET_MIGRATION_CAP,
-    NVA081_CTRL_CMD_VGPU_CONFIG_GET_VGPU_TYPE_INFO,
+    NvA081CtrlCmdVgpuConfigGetMigrationCapParams, NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV525,
+    NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580, NvA081CtrlVgpuInfoV525, NvA081CtrlVgpuInfoV580,
+    NVA081_CTRL_CMD_VGPU_CONFIG_GET_MIGRATION_CAP, NVA081_CTRL_CMD_VGPU_CONFIG_GET_VGPU_TYPE_INFO,
 };
 use crate::nvidia::ctrla082::{
-    NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParams,
+    NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV525,
+    NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580,
     NVA082_CTRL_CMD_HOST_VGPU_DEVICE_GET_VGPU_TYPE_INFO,
 };
 use crate::nvidia::error::{
     NV_ERR_BUSY_RETRY, NV_ERR_NOT_SUPPORTED, NV_ERR_OBJECT_NOT_FOUND, NV_OK,
 };
 use crate::nvidia::nvos::{Nvos54Parameters, NV_ESC_RM_CONTROL};
+use crate::string_number::U32;
 #[cfg(feature = "proxmox")]
 use crate::utils::uuid_to_vmid;
 use crate::uuid::Uuid;
@@ -73,7 +76,11 @@ static LAST_MDEV_UUID: Mutex<Option<Uuid>> = parking_lot::const_mutex(None);
 static CONFIG: Config = {
     match fs::read_to_string(DEFAULT_CONFIG_PATH) {
         Ok(config) => match toml::from_str::<Config>(&config) {
-            Ok(config) => config,
+            Ok(config) => {
+                println!("{:#x?}", config);
+
+                config
+            }
             Err(e) => {
                 eprintln!("Failed to decode config: {}", e);
 
@@ -95,8 +102,8 @@ const DEFAULT_PROFILE_OVERRIDE_CONFIG_PATH: &str = "/etc/vgpu_unlock/profile_ove
 
 trait VgpuConfigLike {
     fn vgpu_type(&mut self) -> &mut u32;
-    fn vgpu_name(&mut self) -> &mut [u8; 32];
-    fn vgpu_class(&mut self) -> &mut [u8; 32];
+    fn vgpu_name(&mut self) -> &mut [u8];
+    fn vgpu_class(&mut self) -> &mut [u8];
     //fn vgpu_signature(&mut self) -> &mut [u8; 128];
     fn license(&mut self) -> &mut [u8; 128];
     fn max_instance(&mut self) -> &mut u32;
@@ -126,6 +133,11 @@ trait VgpuConfigLike {
 }
 
 macro_rules! impl_trait_fn {
+    ($field:ident, [$t:ty; ..]) => {
+        fn $field(&mut self) -> &mut [$t] {
+            &mut self.$field[..]
+        }
+    };
     ($field:ident, $t:ty) => {
         fn $field(&mut self) -> &mut $t {
             &mut self.$field
@@ -145,10 +157,10 @@ macro_rules! impl_trait_fn_aligned {
     };
 }
 
-impl VgpuConfigLike for NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParams {
+impl VgpuConfigLike for NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV525 {
     impl_trait_fn!(vgpu_type, u32);
-    impl_trait_fn!(vgpu_name, [u8; 32]);
-    impl_trait_fn!(vgpu_class, [u8; 32]);
+    impl_trait_fn!(vgpu_name, [u8; ..]);
+    impl_trait_fn!(vgpu_class, [u8; ..]);
     //impl_trait_fn!(vgpu_signature, [u8; 128]);
     impl_trait_fn!(license, [u8; 128]);
     impl_trait_fn!(max_instance, u32);
@@ -183,10 +195,86 @@ impl VgpuConfigLike for NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParams {
     //impl_trait_fn!(vgpu_extra_params, [u8]);
 }
 
-impl VgpuConfigLike for NvA081CtrlVgpuInfo {
+impl VgpuConfigLike for NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580 {
     impl_trait_fn!(vgpu_type, u32);
-    impl_trait_fn!(vgpu_name, [u8; 32]);
-    impl_trait_fn!(vgpu_class, [u8; 32]);
+    impl_trait_fn!(vgpu_name, [u8; ..]);
+    impl_trait_fn!(vgpu_class, [u8; ..]);
+    //impl_trait_fn!(vgpu_signature, [u8; 128]);
+    impl_trait_fn!(license, [u8; 128]);
+    impl_trait_fn!(max_instance, u32);
+    impl_trait_fn!(num_heads, u32);
+    impl_trait_fn!(max_resolution_x, u32);
+    impl_trait_fn!(max_resolution_y, u32);
+    impl_trait_fn!(max_pixels, u32);
+    impl_trait_fn!(frl_config, u32);
+    impl_trait_fn!(cuda_enabled, u32);
+    impl_trait_fn!(ecc_supported, u32);
+    impl_trait_fn!(gpu_instance_size => mig_instance_size, u32);
+    impl_trait_fn!(multi_vgpu_supported, u32);
+    impl_trait_fn!(vdev_id, u64);
+    impl_trait_fn!(pdev_id, u64);
+
+    /*
+    fn profile_size(&mut self) -> Option<&mut u64> {
+        None
+    }
+    */
+
+    impl_trait_fn!(fb_length, u64);
+    impl_trait_fn!(mappable_video_size, u64);
+    impl_trait_fn!(fb_reservation, u64);
+    impl_trait_fn!(encoder_capacity, u32);
+    impl_trait_fn!(bar1_length, u64);
+    impl_trait_fn!(frl_enable, u32);
+    impl_trait_fn!(adapter_name, [u8; 64]);
+    impl_trait_fn!(adapter_name_unicode, [u16; 64]);
+    impl_trait_fn!(short_gpu_name_string, [u8; 64]);
+    impl_trait_fn!(licensed_product_name, [u8; 128]);
+    //impl_trait_fn!(vgpu_extra_params, [u8]);
+}
+
+impl VgpuConfigLike for NvA081CtrlVgpuInfoV525 {
+    impl_trait_fn!(vgpu_type, u32);
+    impl_trait_fn!(vgpu_name, [u8; ..]);
+    impl_trait_fn!(vgpu_class, [u8; ..]);
+    //impl_trait_fn!(vgpu_signature, [u8; 128]);
+    impl_trait_fn!(license, [u8; 128]);
+    impl_trait_fn!(max_instance, u32);
+    impl_trait_fn!(num_heads, u32);
+    impl_trait_fn!(max_resolution_x, u32);
+    impl_trait_fn!(max_resolution_y, u32);
+    impl_trait_fn!(max_pixels, u32);
+    impl_trait_fn!(frl_config, u32);
+    impl_trait_fn!(cuda_enabled, u32);
+    impl_trait_fn!(ecc_supported, u32);
+    impl_trait_fn!(gpu_instance_size => mig_instance_size, u32);
+    impl_trait_fn!(multi_vgpu_supported, u32);
+    impl_trait_fn_aligned!(vdev_id, u64);
+    impl_trait_fn_aligned!(pdev_id, u64);
+
+    /*
+    fn profile_size(&mut self) -> Option<&mut u64> {
+        Some(&mut self.profile_size.0)
+    }
+    */
+
+    impl_trait_fn_aligned!(fb_length, u64);
+    impl_trait_fn_aligned!(mappable_video_size, u64);
+    impl_trait_fn_aligned!(fb_reservation, u64);
+    impl_trait_fn!(encoder_capacity, u32);
+    impl_trait_fn_aligned!(bar1_length, u64);
+    impl_trait_fn!(frl_enable, u32);
+    impl_trait_fn!(adapter_name, [u8; 64]);
+    impl_trait_fn!(adapter_name_unicode, [u16; 64]);
+    impl_trait_fn!(short_gpu_name_string, [u8; 64]);
+    impl_trait_fn!(licensed_product_name, [u8; 128]);
+    //impl_trait_fn!(vgpu_extra_params, [u8]);
+}
+
+impl VgpuConfigLike for NvA081CtrlVgpuInfoV580 {
+    impl_trait_fn!(vgpu_type, u32);
+    impl_trait_fn!(vgpu_name, [u8; ..]);
+    impl_trait_fn!(vgpu_class, [u8; ..]);
     //impl_trait_fn!(vgpu_signature, [u8; 128]);
     impl_trait_fn!(license, [u8; 128]);
     impl_trait_fn!(max_instance, u32);
@@ -264,17 +352,40 @@ struct VgpuProfileOverride {
     license_type: Option<String>,
 }
 
+fn check_size_log(name: &str, actual_size: usize, expected_size: usize) {
+    error!(
+        "Parameters size for {} was {} bytes, expected {} bytes",
+        name, actual_size, expected_size
+    );
+}
+
+fn check_size_multiple_log(name: &str, actual_size: usize, expected_size: &[usize]) {
+    error!(
+        "Parameters size for {} was {} bytes, expected one of {:?} bytes",
+        name, actual_size, expected_size
+    );
+}
+
 fn check_size(name: &str, actual_size: usize, expected_size: usize) -> bool {
     if actual_size != expected_size {
-        error!(
-            "Parameters size for {} was {} bytes, expected {} bytes",
-            name, actual_size, expected_size
-        );
+        check_size_log(name, actual_size, expected_size);
 
         false
     } else {
         true
     }
+}
+
+#[inline(always)]
+fn check_size_raw(actual_size: usize, expected_size: usize) -> bool {
+    actual_size == expected_size
+}
+
+#[inline(always)]
+fn check_size_raw_multiple(actual_size: usize, expected_size: &[usize]) -> bool {
+    expected_size
+        .iter()
+        .any(|&expected_size| actual_size == expected_size)
 }
 
 /// # Safety
@@ -337,6 +448,39 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
             )
         };
     }
+    macro_rules! check_size_raw {
+        ($expected_type:ty) => {
+            check_size_raw(
+                io_data.params_size as usize,
+                mem::size_of::<$expected_type>(),
+            )
+        };
+        ($expected_type:ty, other: [$($expected_size:expr),* $(,)?]) => {
+            check_size_raw_multiple(
+                io_data.params_size as usize,
+                &[
+                    mem::size_of::<$expected_type>(),
+                    $($expected_size,)*
+                ],
+            )
+        };
+    }
+    macro_rules! check_size_log {
+        (
+            name: $name:ident,
+            types: [$($expected_type:ty),* $(,)?],
+            other: [$($expected_size:expr),* $(,)?] $(,)?
+        ) => {
+            check_size_multiple_log(
+                stringify!($name),
+                io_data.params_size as usize,
+                &[
+                    $(mem::size_of::<$expected_type>(),)*
+                    $($expected_size,)*
+                ],
+            )
+        }
+    }
 
     match io_data.cmd {
         NV2080_CTRL_CMD_BUS_GET_PCI_INFO
@@ -353,48 +497,60 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
             let actual_device_id = (orig_device_id & 0xffff0000) >> 16;
             let actual_sub_system_id = (orig_sub_system_id & 0xffff0000) >> 16;
 
-            let (spoofed_devid, spoofed_subsysid) = match actual_device_id {
-                // Maxwell
-                0x1340..=0x13bd | 0x174d..=0x179c => {
-                    // Tesla M10
-                    (0x13bd, 0x1160)
+            let mapped_id = CONFIG
+                .pci_info_map
+                .as_ref()
+                .and_then(|pci_info_map| pci_info_map.get(&U32(actual_device_id)));
+
+            let (spoofed_devid, spoofed_subsysid) = if let Some(mapping) = mapped_id {
+                (mapping.device_id as u32, mapping.sub_system_id as u32)
+            } else {
+                match actual_device_id {
+                    // Maxwell
+                    0x1340..=0x13bd | 0x174d..=0x179c => {
+                        // Tesla M10
+                        (0x13bd, 0x1160)
+                    }
+                    // Maxwell 2.0
+                    0x13c0..=0x1436 | 0x1617..=0x1667 | 0x17c2..=0x17fd => {
+                        // Tesla M60
+                        (0x13f2, actual_sub_system_id)
+                    }
+                    // Pascal
+                    0x15f0 | 0x15f1 | 0x1b00..=0x1d56 | 0x1725..=0x172f => {
+                        // Tesla P40
+                        (0x1b38, actual_sub_system_id)
+                    }
+                    // GV100 Volta
+                    //
+                    // 0x1d81 = TITAN V
+                    // 0x1dba = Quadro GV100 32GB
+                    0x1d81 | 0x1dba => {
+                        // Tesla V100 32GB PCIE
+                        (0x1db6, actual_sub_system_id)
+                    }
+                    // Turing
+                    0x1e02..=0x1ff9 | 0x2182..=0x21d1 => {
+                        // Quadro RTX 6000
+                        (0x1e30, 0x12ba)
+                    }
+                    // Ampere
+                    0x2200..=0x2600 => {
+                        // RTX A6000
+                        (0x2230, actual_sub_system_id)
+                    }
+                    _ => (actual_device_id, actual_sub_system_id),
                 }
-                // Maxwell 2.0
-                0x13c0..=0x1436 | 0x1617..=0x1667 | 0x17c2..=0x17fd => {
-                    // Tesla M60
-                    (0x13f2, actual_sub_system_id)
-                }
-                // Pascal
-                0x15f0 | 0x15f1 | 0x1b00..=0x1d56 | 0x1725..=0x172f => {
-                    // Tesla P40
-                    (0x1b38, actual_sub_system_id)
-                }
-                // GV100 Volta
-                //
-                // 0x1d81 = TITAN V
-                // 0x1dba = Quadro GV100 32GB
-                0x1d81 | 0x1dba => {
-                    // Tesla V100 32GB PCIE
-                    (0x1db6, actual_sub_system_id)
-                }
-                // Turing
-                0x1e02..=0x1ff9 | 0x2182..=0x21d1 => {
-                    // Quadro RTX 6000
-                    (0x1e30, 0x12ba)
-                }
-                // Ampere
-                0x2200..=0x2600 => {
-                    // RTX A6000
-                    (0x2230, actual_sub_system_id)
-                }
-                _ => (actual_device_id, actual_sub_system_id),
             };
 
             params.pci_device_id = (orig_device_id & 0xffff) | (spoofed_devid << 16);
             params.pci_sub_system_id = (orig_sub_system_id & 0xffff) | (spoofed_subsysid << 16);
         }
         NV0080_CTRL_CMD_GPU_GET_VIRTUALIZATION_MODE
-            if check_size!(
+        // 18.0 driver sends larger struct with size 8 bytes. Only extra members added at the end,
+        // nothing in between or changed, so accessing the larger struct is "safe"
+        if io_data.params_size == 8
+            || check_size!(
                 NV0080_CTRL_CMD_GPU_GET_VIRTUALIZATION_MODE,
                 Nv0080CtrlGpuGetVirtualizationModeParams
             ) && CONFIG.unlock =>
@@ -432,10 +588,13 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
                 *LAST_MDEV_UUID.lock() = Some(config.mdev_uuid);
             }
             NV0000_CTRL_CMD_VGPU_CREATE_DEVICE
-                if check_size!(
-                    NV0000_CTRL_CMD_VGPU_CREATE_DEVICE,
-                    Nv0000CtrlVgpuCreateDeviceParams
-                ) =>
+                // 18.0 driver sends larger struct with size 40 bytes. Only extra members added at the end,
+                // nothing in between or changed, so accessing the larger struct is "safe"
+                if io_data.params_size == 40
+                    || check_size!(
+                        NV0000_CTRL_CMD_VGPU_CREATE_DEVICE,
+                        Nv0000CtrlVgpuCreateDeviceParams
+                    ) =>
             {
                 // 17.0 driver provides mdev uuid as vgpu_name in this command
                 let params: &mut Nv0000CtrlVgpuCreateDeviceParams = &mut *io_data.params.cast();
@@ -444,16 +603,16 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
                 *LAST_MDEV_UUID.lock() = Some(params.vgpu_name);
             }
             NVA081_CTRL_CMD_VGPU_CONFIG_GET_VGPU_TYPE_INFO => {
-                // 18.0 driver sends larger struct with size 5232 bytes, 17.0 driver sends larger struct with size 5096 bytes. Only extra members added at the end,
-                // nothing in between or changed, so accessing the larger struct is "safe"
-                if io_data.params_size == 5232
-                    || io_data.params_size == 5096
-                    || check_size!(
-                        NVA081_CTRL_CMD_VGPU_CONFIG_GET_VGPU_TYPE_INFO,
-                        NvA081CtrlVgpuConfigGetVgpuTypeInfoParams
+                if
+                    // 18.0 driver sends larger struct with size 5232 bytes, 17.0 driver sends a
+                    // larger struct with size 5096 bytes. Only extra members added at the end,
+                    // nothing earlier changed in the structure, so accessing the struct is "safe".
+                    check_size_raw!(
+                        NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV525,
+                        other: [5232, 5096]
                     )
                 {
-                    let params: &mut NvA081CtrlVgpuConfigGetVgpuTypeInfoParams =
+                    let params: &mut NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV525 =
                         &mut *io_data.params.cast();
                     info!("{:#?}", params);
 
@@ -461,21 +620,59 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
                         error!("Failed to apply profile override");
                         return -1;
                     }
+                } else if
+                    // 19.0 driver sends much larger structure than 18.x and prior with expanded
+                    // fields. This necessitated a separate structure as it was no longer
+                    // backwards compatible.
+                    check_size_raw!(NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580)
+                {
+                    let params: &mut NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580 =
+                        &mut *io_data.params.cast();
+                    info!("{:#?}", params);
+
+                    if !handle_profile_override(&mut params.vgpu_type_info) {
+                        error!("Failed to apply profile override");
+                        return -1;
+                    }
+                } else {
+                    check_size_log! {
+                        name: NVA081_CTRL_CMD_VGPU_CONFIG_GET_VGPU_TYPE_INFO,
+                        types: [
+                            NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV525,
+                            NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580,
+                        ],
+                        other: [5232, 5096],
+                    };
                 }
             }
-            NVA082_CTRL_CMD_HOST_VGPU_DEVICE_GET_VGPU_TYPE_INFO
-                if check_size!(
-                    NVA082_CTRL_CMD_HOST_VGPU_DEVICE_GET_VGPU_TYPE_INFO,
-                    NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParams
-                ) =>
-            {
-                let params: &mut NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParams =
-                    &mut *io_data.params.cast();
-                info!("{:#?}", params);
+            NVA082_CTRL_CMD_HOST_VGPU_DEVICE_GET_VGPU_TYPE_INFO => {
+                if check_size_raw!(NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV525) {
+                    let params: &mut NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV525 =
+                        &mut *io_data.params.cast();
+                    info!("{:#?}", params);
 
-                if !handle_profile_override(params) {
-                    error!("Failed to apply profile override");
-                    return -1;
+                    if !handle_profile_override(params) {
+                        error!("Failed to apply profile override");
+                        return -1;
+                    }
+                } else if check_size_raw!(NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580) {
+                    let params: &mut NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580 =
+                        &mut *io_data.params.cast();
+                    info!("{:#?}", params);
+
+                    if !handle_profile_override(params) {
+                        error!("Failed to apply profile override");
+                        return -1;
+                    }
+                } else {
+                    check_size_log! {
+                        name: NVA082_CTRL_CMD_HOST_VGPU_DEVICE_GET_VGPU_TYPE_INFO,
+                        types: [
+                            NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV525,
+                            NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580,
+                        ],
+                        other: [],
+                    };
                 }
             }
             _ => {}
